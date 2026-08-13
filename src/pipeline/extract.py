@@ -1,28 +1,62 @@
-# coding: utf-8
-
-# python -m pipeline.extract --date 2026-08-09
-
-# Requirements:
-
-# Takes a --date argument. Everything downstream depends on this.
-# Pages until it runs out, using $limit and $offset.
-# Filters on created_date in SoQL. Use the shape we drilled: >= the day and < the next day. Not BETWEEN. That upper bound being exclusive is what keeps midnight records from landing in two files.
-# Writes newline-delimited JSON: one complete record per line, no wrapping array, no commas between. It's the format warehouses load natively and the one you can append to and split. Get used to the extension .jsonl.
-# Writes to a path with the date in it, like data/raw/311/date=2026-08-09/requests.jsonl. That key=value folder naming is the standard partitioning convention and it carries over unchanged when this becomes an S3 key.
-# Overwrites that file on rerun rather than appending.
-
-# One thing to think through before you write the loop:
-# offset pagination assumes the underlying data holds still while you page through it.
-# New 311 requests are being filed the entire time you're running.
-# What could you add to your query to make the ordering deterministic so page 3 doesn't repeat or skip rows from page 2?
-# The answer is one parameter, and knowing why you added it is a good interview beat.
-
 import os
-import pipeline as pl
+import argparse
+from datetime import date, timedelta
+import time
+# from pathlib import Path
+import requests as req
+from dotenv import load_dotenv
 
+load_dotenv()
 
-socrata_domain = "opendata.socrata.com"
-socrata_dataset_identifier = "f92i-ik66"
+# New York City 311 Service Requests dataset ID
+dataset_id = "erm2-nwe9"
+url = f"https://data.cityofnewyork.us/resource/{dataset_id}.json"
 
-socrata_token = os.environ.get("NYC_311_APP_TOKEN")
+NYC_311_APP_TOKEN = os.getenv("NYC_311_APP_TOKEN")
+if not NYC_311_APP_TOKEN: raise ValueError("NYC_311_APP_TOKEN environment variable is not set.")
 
+headers = {"X-App-Token": NYC_311_APP_TOKEN}
+lag_cutoff = date.today() - timedelta(days=3)
+
+def extract_data(extraction_date):
+    target_date_end = extraction_date + timedelta(days=1) if extraction_date else lag_cutoff + timedelta(days=1)
+
+    print(f"Extracting {extraction_date} to {target_date_end}...")
+
+    if extraction_date > lag_cutoff:
+        print(f"Warning: {extraction_date} is within the 3-day publication lag. Data may be incomplete.")
+
+    accumulated_list = []
+    offset_value = 0
+    limit_value = 1000
+
+    while True:
+        params = {
+            "$where": f"created_date >= '{extraction_date}T00:00:00' AND created_date < '{target_date_end}T00:00:00'",
+            "$order": "created_date ASC, unique_key ASC",
+            "$offset": offset_value,
+            "$limit": limit_value,
+        }
+
+        response = req.get(url, params=params, headers=headers, timeout=60)
+        json_data = response.json()
+
+        offset_value += len(json_data)
+        accumulated_list.extend(json_data)
+
+        print(f"fetching {len(json_data)} items...\n total fetched items: {offset_value}\n")
+
+        if len(json_data) < limit_value:
+            break
+        time.sleep(0.2)
+        # Save accumulated data to a .jsonl file
+
+# Runner and bash argument parser
+def main():
+    parser = argparse.ArgumentParser(description="Extract data from NYC 311 Service Requests dataset.")
+    parser.add_argument("--date", default=lag_cutoff, type=date.fromisoformat, help="Date for which to extract data in YYYY-MM-DD format.")
+
+    args = parser.parse_args()
+    extract_data(extraction_date=args.date)
+
+if __name__ == "__main__": main()
