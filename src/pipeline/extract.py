@@ -1,11 +1,13 @@
-import os
-import json
 import argparse
 from datetime import date, timedelta
-import time
-from pathlib import Path
-import requests as req
 from dotenv import load_dotenv
+import json
+import os
+from pathlib import Path
+import random
+import requests as req
+import time
+
 load_dotenv()
 
 # Both the file write and idempotent reruns are one design, not two:
@@ -25,15 +27,16 @@ def load_config():
     if not token:
         raise ValueError("NYC_311_APP_TOKEN environment variable is not set.")
     return {
+        "order": "created_date ASC, unique_key ASC",
         "url": f"https://data.cityofnewyork.us/resource/{DATASET_ID}.json",
         "headers": {"X-App-Token": token}
     }
 
-def build_params(extraction_date, offset, limit, select=None):
+def build_params(extraction_date, order, offset, limit, select=None):
     date_end = extraction_date + timedelta(days=1)
     params = {
         '$where': f"created_date >= '{extraction_date}T00:00:00' AND created_date < '{date_end}T00:00:00'",
-        "$order": "created_date ASC, unique_key ASC",
+        "$order": order,
         "$offset": offset,
         "$limit": limit
     }
@@ -47,7 +50,7 @@ def fetch_all_records(extraction_date, config):
     limit_value = 1000
 
     while True: 
-        params = build_params(extraction_date, offset_value, limit_value)
+        params = build_params(extraction_date, config["order"], offset_value, limit_value)
 
         json_data = fetch_page(config["url"], params, config["headers"])
 
@@ -62,10 +65,39 @@ def fetch_all_records(extraction_date, config):
     return accumulated_list
 
 def fetch_page(url, params, headers):
-    response = req.get(url, params=params, headers=headers, timeout=60)
-    response.raise_for_status()  # Error response would otherwise still write a file with error payload
-    json_data = response.json()
-    return json_data
+    retries = 5
+
+    for attempt in range(retries):
+        remaining_attempts = retries-attempt
+        try:
+            response = req.get(url, params=params, headers=headers, timeout=60)
+
+            if response.status_code == 429 or response.status_code >= 500:
+                raise req.HTTPError(f"Status {response.status_code}")
+
+            response.raise_for_status()  # Error response would otherwise still write a file with error payload
+            json_data = response.json()
+            return json_data
+
+        except req.Timeout:
+            print(f"Timeout error. Retries remaining: {remaining_attempts}.")
+
+        except req.ConnectionError:
+            print(f"Connection error. Retries remaining: {remaining_attempts}")
+
+        except req.HTTPError as e:
+            print(f"HTTP error: {e}. Retries remaining: {remaining_attempts}.")
+
+        if attempt < retries - 1:
+            backoff = 2**attempt
+            time.sleep(backoff + random.uniform(0, 1))
+
+    raise RuntimeError(f"Closing resources. Unable to retrieve records after {retries} times.")
+
+def fetch_record_count(extraction_date, config):
+    params = build_params(extraction_date, None, 0, 1, "count(*)")
+    count = int(fetch_page(config["url"], params, config["headers"])[0]["count"])
+    return count
 
 def save_to_jsonl(data, extraction_date):
     output_dir = Path(f"data/raw/311/date={extraction_date}")
@@ -81,11 +113,16 @@ def save_to_jsonl(data, extraction_date):
 
 def extract_data(extraction_date, lag_cutoff, config):
     target_date_end = extraction_date + timedelta(days=1)
-    print(f"Extracting {extraction_date} to {target_date_end}...")
+    count = fetch_record_count(extraction_date, config)
+
+    print(f"Extracting {count} records from {extraction_date} to {target_date_end}...")
 
     if extraction_date > lag_cutoff:
         print(f"Warning: {extraction_date} is within the 3-day publication lag. Data may be incomplete.")
     records = fetch_all_records(extraction_date, config)
+
+    if len(records) != count:
+        raise ValueError(f"Expected {count} records, got {len(records)}.")
 
     save_to_jsonl(records, extraction_date)
 
