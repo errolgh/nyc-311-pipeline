@@ -72,9 +72,6 @@ def fetch_page(url, params, headers):
         try:
             response = req.get(url, params=params, headers=headers, timeout=60)
 
-            if response.status_code == 429 or response.status_code >= 500:
-                raise req.HTTPError(f"Status {response.status_code}")
-
             response.raise_for_status()  # Error response would otherwise still write a file with error payload
             json_data = response.json()
             return json_data
