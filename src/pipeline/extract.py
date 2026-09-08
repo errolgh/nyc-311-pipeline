@@ -86,6 +86,10 @@ def fetch_page(url, params, headers):
             print(f"Connection error. Retries remaining: {remaining_attempts}")
 
         except req.HTTPError as e:
+            if e.response is not None:
+                code = e.response.status_code
+                if 400 <= code < 500 and code !=429:
+                    raise
             print(f"HTTP error: {e}. Retries remaining: {remaining_attempts}.")
 
         if attempt < retries - 1:
