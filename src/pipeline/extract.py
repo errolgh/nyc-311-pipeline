@@ -100,8 +100,8 @@ def fetch_record_count(extraction_date, config):
     count = int(fetch_page(config["url"], params, config["headers"])[0]["count"])
     return count
 
-def save_to_jsonl(data, extraction_date):
-    output_dir = Path(f"data/raw/311/date={extraction_date}")
+def save_to_jsonl(data, extraction_date, base_dir="data/raw/311"):
+    output_dir = Path(f"{base_dir}/date={extraction_date}")
     output_dir.mkdir(parents=True, exist_ok=True)
     final_output_file = output_dir / "requests.jsonl" #append file extension
     temp_file = output_dir / "requests.jsonl.tmp" #temp file for atomic write
